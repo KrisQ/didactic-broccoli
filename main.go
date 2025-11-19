@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/KrisQ/didactic-broccoli/internal/database"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -17,10 +19,22 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
-type chirpRequest struct {
-	Body string `json:"body"`
+type userResponse struct {
+	ID        uuid.UUID `json:"id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type chirpResponse struct {
+	ID        uuid.UUID `json:"id"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -47,12 +61,26 @@ func (cfg *apiConfig) metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-func (cfg *apiConfig) resetHandler(w http.ResponseWriter, _ *http.Request) {
+func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
 	cfg.fileserverHits.Store(0)
 	message := fmt.Sprintf("Hits: %v", cfg.fileserverHits.Load())
-	w.Write([]byte(message))
+	err := cfg.dbQueries.DeleteUsers(r.Context())
+	if err != nil {
+		fmt.Println("oh well")
+		return
+	}
+	err = cfg.dbQueries.DeleteChrips(r.Context())
+	if err != nil {
+		fmt.Println("oh well")
+		return
+	}
+	_, err = w.Write([]byte(message))
+	if err != nil {
+		fmt.Println("oh well")
+		return
+	}
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
@@ -61,25 +89,42 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte("OK"))
 }
 
-func validateChirp(w http.ResponseWriter, r *http.Request) {
-	type resVals struct {
-		CleanedBody string `json:"cleaned_body,omitempty"`
-		Error       string `json:"error,omitempty"`
+func (cfg *apiConfig) createChirp(w http.ResponseWriter, r *http.Request) {
+	type reqVals struct {
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
-	var response resVals
-	w.Header().Set("Content-Type", "application/json")
-	status := 200
 	decoder := json.NewDecoder(r.Body)
-	params := chirpRequest{}
+	params := reqVals{}
+	w.Header().Set("Content-Type", "application/json")
 	err := decoder.Decode(&params)
 	if err != nil {
-		status = 500
-		response.Error = "Something went wrong"
+		log.Printf("couldn't decode chirp")
+		w.WriteHeader(500)
+		return
 	} else if len(params.Body) > 140 {
-		status = 400
-		response.Error = "Chirp is too long"
+		log.Printf("chirp too long")
+		w.WriteHeader(400)
+		return
 	} else {
-		response.CleanedBody = removeProfanity(params.Body)
+		params.Body = removeProfanity(params.Body)
+	}
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body:   params.Body,
+		UserID: params.UserID,
+	})
+	if err != nil {
+		log.Printf("couldn't create chirp")
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(201)
+	response := chirpResponse{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
 	}
 	dat, err := json.Marshal(response)
 	if err != nil {
@@ -87,7 +132,46 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		return
 	}
-	w.WriteHeader(status)
+	_, err = w.Write(dat)
+	if err != nil {
+		log.Printf("Error writing %s", err)
+		w.WriteHeader(500)
+		return
+	}
+}
+
+func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	type reqVals struct {
+		Email string `json:"email"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	params := reqVals{}
+	err := decoder.Decode(&params)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		log.Printf("Error writing %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	user, err := cfg.dbQueries.CreateUser(r.Context(), params.Email)
+	if err != nil {
+		log.Printf("Error creating user %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	response := userResponse{
+		ID:        user.ID,
+		Email:     user.Email,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+	}
+	dat, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Error marshilling res %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(201)
 	_, err = w.Write(dat)
 	if err != nil {
 		log.Printf("Error writing %s", err)
@@ -122,9 +206,11 @@ func main() {
 
 	var apiCfg apiConfig
 	apiCfg.dbQueries = database.New(db)
+	apiCfg.platform = os.Getenv("PLATFORM")
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	mux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
-	mux.Handle("POST /api/validate_chirp", http.HandlerFunc(validateChirp))
+	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.createChirp))
+	mux.Handle("POST /api/users", http.HandlerFunc(apiCfg.createUser))
 	mux.Handle("GET /admin/metrics", http.HandlerFunc(apiCfg.metricsHandler))
 	mux.Handle("POST /admin/reset", http.HandlerFunc(apiCfg.resetHandler))
 
