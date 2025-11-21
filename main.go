@@ -207,11 +207,18 @@ func main() {
 	var apiCfg apiConfig
 	apiCfg.dbQueries = database.New(db)
 	apiCfg.platform = os.Getenv("PLATFORM")
+
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
+
 	mux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
+
+	mux.Handle("GET /api/chirps", http.HandlerFunc(apiCfg.getChirps))
 	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.createChirp))
+
 	mux.Handle("POST /api/users", http.HandlerFunc(apiCfg.createUser))
+
 	mux.Handle("GET /admin/metrics", http.HandlerFunc(apiCfg.metricsHandler))
+
 	mux.Handle("POST /admin/reset", http.HandlerFunc(apiCfg.resetHandler))
 
 	log.Printf("Serving on port: %s\n", port)
