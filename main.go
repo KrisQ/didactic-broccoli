@@ -180,6 +180,43 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	if err != nil {
+		log.Printf("Error creating user %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	response := []chirpResponse{}
+	for _, chirp := range chirps {
+		item := chirpResponse{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		}
+		response = append(response, item)
+	}
+	dat, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Error marshilling res %s", err)
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(200)
+	_, err = w.Write(dat)
+	if err != nil {
+		log.Printf("Error writing %s", err)
+		w.WriteHeader(500)
+		return
+	}
+}
+
+func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+}
+
 func main() {
 	const port = "8080"
 
@@ -212,6 +249,7 @@ func main() {
 
 	mux.Handle("GET /api/healthz", http.HandlerFunc(healthHandler))
 
+	mux.Handle("GET /api/chirp/{chirpID}", http.HandlerFunc(apiCfg.getChirps))
 	mux.Handle("GET /api/chirps", http.HandlerFunc(apiCfg.getChirps))
 	mux.Handle("POST /api/chirps", http.HandlerFunc(apiCfg.createChirp))
 
